@@ -1,0 +1,6 @@
+[
+  {"op": "LDC", "dst": "R1", "imm": 65536},
+  {"op": "LDC", "dst": "R2", "imm": 1},
+  {"op": "ADD", "dst": "R1", "src": "R2"},
+  {"op": "ST", "src": "R1", "addr": 0}
+]

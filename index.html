@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>УВМ — Web GUI (PyScript)</title>
+  <link rel="stylesheet" href="https://pyscript.net/releases/2024.11.1/core.css" />
+  <script type="module" src="https://pyscript.net/releases/2024.11.1/core.js"></script>
+  <style>
+    body { font: 14px/1.4 system-ui, ui-sans-serif, Segoe UI, Roboto; margin: 0; }
+    .wrap { display: grid; grid-template-columns: 1fr 400px; gap: 12px; padding: 12px; height: 100vh; box-sizing: border-box; }
+    textarea { width: 100%; height: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .side { display: flex; flex-direction: column; }
+    .out { flex: 1; white-space: pre-wrap; overflow: auto; background: #0b1020; color: #e6edf3; padding: 8px; border-radius: 8px; }
+    button { padding: 8px 12px; border-radius: 8px; border: 1px solid #ccc; background: #f5f5f5; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <textarea id="src">[
+  {"op":"LDC","dst":"R1","imm":287454020},
+  {"op":"BSWAP","dst":"R1"},
+  {"op":"ST","src":"R1","addr":0}
+]</textarea>
+    <div class="side">
+      <div>
+        <button id="run">Ассемблировать и выполнить</button>
+      </div>
+      <div class="out" id="out">Готово к запуску…</div>
+    </div>
+  </div>
+
+  <script type="py" terminal worker>
+from pyscript import when, display
+import json, struct, xml.etree.ElementTree as ET
+
+REGS = {f"R{i}": i for i in range(8)}
+OP = {'LDC':1,'LD':2,'ST':3,'BSWAP':4,'ADD':5,'SUB':6,'JMP':7,'JNZ':8,'MOV':9}
+
+class IR:
+    def __init__(self,op,**kw):
+        self.op=op; self.__dict__.update(kw)
+
+class Asm:
+    def __init__(self):
+        self.labels={}; self.ir=[]
+    def _reg(self,v):
+        if isinstance(v,int): return v
+        return REGS[v.upper()]
+    def _u32(self,x):
+        return x & 0xFFFFFFFF
+    def _size(self,i):
+        return 0 if i.op=='LABEL' else 2+(4 if i.op in ('LDC','LD','ST','JMP','JNZ') else 0)
+    def parse(self,data):
+        pc=0
+        for it in data:
+            op=it['op'].upper()
+            if op=='LABEL':
+                name=it['name']; self.labels[name]=pc; self.ir.append(IR('LABEL',name=name,pc=pc)); continue
+            ii=IR(op, pc=pc)
+            for k in ('dst','src','reg'):
+                if k in it:
+                    setattr(ii,k,self._reg(it[k]) if isinstance(it[k],(str,int)) else it[k])
+            if 'imm' in it: ii.imm=self._u32(it['imm'])
+            if 'addr' in it: ii.addr=it['addr']
+            if 'target' in it: ii.addr=it['target']
+            self.ir.append(ii); pc+=self._size(ii)
+        return self.ir
+    def enc(self):
+        out=bytearray()
+        for ii in self.ir:
+            if ii.op=='LABEL': continue
+            rb=((getattr(ii,'dst',0) or 0)&0xF)<<4
+            low=(getattr(ii,'src',None) if getattr(ii,'src',None) is not None else (getattr(ii,'reg',0) or 0)) & 0xF
+            rb|=low
+            out.append(OP[ii.op]); out.append(rb)
+            if ii.op in ('LDC','LD','ST','JMP','JNZ'):
+                v=self._enc_op(ii)
+                out+=struct.pack('<I',v)
+        return bytes(out)
+    def _enc_op(self,ii):
+        if ii.op=='LDC': return ii.imm or 0
+        op=ii.addr
+        if isinstance(op,int): return op & 0xFFFFFFFF
+        if isinstance(op,str):
+            u=op.upper()
+            if u in self.labels: return self.labels[u]
+            if u in REGS: return (0xFFFF<<16) | REGS[u]
+        raise ValueError('bad addr/target')
+
+class VM:
+    def __init__(self, n=64*1024):
+        self.mem=bytearray(n); self.reg=[0]*8; self.pc=0; self.halted=False
+    def load(self,code): self.mem[0:len(code)]=code
+    def _ru32(self,a): return struct.unpack_from('<I',self.mem,a)[0]
+    def _wu32(self,a,v): struct.pack_into('<I',self.mem,a,v & 0xFFFFFFFF)
+    def _addr(self,op):
+        return self.reg[op & 0x7] if (op>>16)==0xFFFF else (op & 0xFFFFFFFF)
+    def step(self):
+        if self.halted: return False
+        oc=self.mem[self.pc]; rb=self.mem[self.pc+1]; dst=(rb>>4)&0xF; low=rb&0xF; self.pc+=2
+        def imm():
+            v=self._ru32(self.pc); self.pc+=4; return v
+        if oc==1: self.reg[dst]=imm()
+        elif oc==2: self.reg[dst]=self._ru32(self._addr(imm()))
+        elif oc==3: self._wu32(self._addr(imm()), self.reg[low&7])
+        elif oc==4:
+            x=self.reg[dst] & 0xFFFFFFFF
+            self.reg[dst]= ((x&0xFF)<<24)|((x>>8)&0xFF)<<16|((x>>16)&0xFF)<<8|((x>>24)&0xFF)
+        elif oc==5: self.reg[dst]=(self.reg[dst]+self.reg[low&7])&0xFFFFFFFF
+        elif oc==6: self.reg[dst]=(self.reg[dst]-self.reg[low&7])&0xFFFFFFFF
+        elif oc==7: self.pc=self._addr(imm())
+        elif oc==8:
+            t=imm();
+            if self.reg[low&7]!=0: self.pc=self._addr(t)
+        elif oc==9: self.reg[dst]=self.reg[low&7]
+        else: self.halted=True; return False
+        return True
+    def run(self,cap=1_000_000):
+        k=0
+        while not self.halted and k<cap:
+            if not self.step(): break
+            k+=1
+        return k
+
+@when('click','#run')
+def _(_evt):
+    src = Element('src').v
