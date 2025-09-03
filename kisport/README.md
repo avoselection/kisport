@@ -133,5 +133,5 @@
 * **Web/WASM**: содержимое `web/` раздайте как статический сайт (PyScript/pyodide загрузит `uvm.py`).
 
 ```
-python uvm.py build --all   # создаст дистрибутивы (требует pyinstaller)
+python3 uvm.py build --all   # создаст дистрибутивы (требует pyinstaller)
 ```
